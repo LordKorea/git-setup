@@ -1,0 +1,173 @@
+#!/usr/bin/python3
+
+import json
+import os
+import os.path
+import requests
+import sys
+
+# Configuration
+GH_TOKEN_PATH = os.path.expanduser("~/.ssh/github_token")
+GL_TOKEN_PATH = os.path.expanduser("~/.ssh/gitlab_token")
+
+
+def get_token(tkpath):
+    """Fetches a token from the given path.
+
+    Args:
+        tkpath: The token file path.
+    """
+    if not os.path.exists(tkpath):
+        print("Tokenfile %s does not exist, aborting." % tkpath)
+        sys.exit(1)
+    with open(tkpath, "r") as f:
+        return f.read().replace("\n", "").replace("\r", "").strip()
+
+def prune_empty(d):
+    """Prunes keys with empty values.
+
+    Args:
+        d: The dictionary.
+
+    Returns:
+        The pruned dictionary.
+    """
+    r = d.copy()
+    for key in d:
+        if len(d[key]) == 0:
+            del r[key]
+    return r
+
+def call_api(fun, root, hdr, endpoint, payload=None):
+    """Makes an API call.
+
+    Args:
+        fun: The requests method for the requested request method.
+        root: The API root.
+        hdr: The request headers.
+        endpoint: The requested API endpoint.
+        payload: The payload (POST data) for the request.
+    """
+    if payload is None:
+        payload = {}
+
+    r = fun(root + endpoint, headers=hdr, data=payload)
+    if r.status_code >= 300 or r.status_code <= 199:
+        print("Unsuccessful request, result is:")
+        print(r.text)
+    r.raise_for_status()
+    r.encoding = "utf-8"
+    return r.json()
+
+def post_api(root, hdr, endpoint, payload=None):
+    return call_api(requests.post, root, hdr, endpoint, payload)
+
+def put_api(root, hdr, endpoint, payload=None):
+    return call_api(requests.put, root, hdr, endpoint, payload)
+
+GH_TOKEN = get_token(GH_TOKEN_PATH)
+GH_API_ROOT = "https://api.github.com"
+GH_API_HDR = {
+    "Accept": "application/vnd.github.v3+json",
+    "Authorization": "token %s" % GH_TOKEN
+}
+
+GL_TOKEN = get_token(GL_TOKEN_PATH)
+GL_API_ROOT = "https://gitlab.com/api/v4"
+GL_API_HDR = {
+    "Private-Token": GL_TOKEN
+}
+
+# Obtain the repository name.
+reponame = os.path.split(os.getcwd())[1]
+print("Repository name? [%s] " % reponame, end="")
+override = input()
+if len(override) != 0:
+    reponame = override
+print("Using '%s' as repository name." % reponame)
+
+# Obtain the description of the repository for github.
+print("GitHub repository description? [<empty>] ", end="")
+gh_desc = input()
+if len(gh_desc) > 0:
+    print("Using '%s' as repository description on GitHub." % gh_desc)
+
+# Obtain the homepage of the repository for github.
+print("GitHub repository homepage? [<empty>] ", end="")
+gh_hp = input()
+if len(gh_hp) > 0:
+    print("Using '%s' as repository homepage on GitHub." % gh_hp)
+
+# Obtain the description of the repository for gitlab.
+print("GitLab repository description? [<empty>] ", end="")
+gl_desc = input()
+if len(gl_desc) > 0:
+    print("Using '%s' as repository description on GitLab." % gl_desc)
+
+# Ask for GitHub discord integration.
+print("Discord integration webhook? [<none>] ", end="")
+discord_hook = input()
+if len(discord_hook) > 0:
+    print("Using '%s' as discord integration webhook." % discord_hook)
+
+# Create a github repository and a gitlab repository with the given name.
+gh_repo = post_api(GH_API_ROOT, GH_API_HDR, "/user/repos",
+                   json.dumps(prune_empty({
+    "name": reponame,
+    "description": gh_desc,
+    "homepage": gh_hp
+})))
+print("Created GH repo: ID %d" % gh_repo["id"])
+gl_repo = post_api(GL_API_ROOT, GL_API_HDR, "/projects", prune_empty({
+    "name": reponame,
+    "description": gl_desc,
+    "visibility": "public"
+}))
+print("Created GL repo: ID %d" % gl_repo["id"])
+
+# Setup discord webhooks, if requested.
+if len(discord_hook) > 0:
+    post_api(GH_API_ROOT, GH_API_HDR, "/repos/%s/hooks" % gh_repo["full_name"],
+             json.dumps({
+        "name": "web",
+        "active": True,
+        "config": {
+            "url": discord_hook + "/github",
+            "content_type": "json"
+        },
+        "events": [
+            "commit_comment",
+            "create",
+            "delete",
+            "fork",
+            "gollum",  # Wiki event name
+            "issue_comment",
+            "issues",
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+            "push",
+            "star",
+            "watch"
+        ]
+    }))
+    put_api(GL_API_ROOT, GL_API_HDR,
+             "/projects/%d/services/slack" % gl_repo["id"], {
+        "webhook": discord_hook + "/slack",
+        "username": "Git",
+        "push_events": True,
+        "issues_events": True,
+        "confidential_issues_events": False,
+        "merge_requests_events": True,
+        "tag_push_events": True,
+        "note_events": True,
+        "confidential_note_events": False,
+        "job_events": True,
+        "pipeline_events": True,
+        "wiki_page_events": True,
+        "notify_only_broken_pipelines": False,
+        "notify_only_default_branch": False
+    })
+    print("Discord integrations created.")
+
+print("Sucessfully set up repositories.")
